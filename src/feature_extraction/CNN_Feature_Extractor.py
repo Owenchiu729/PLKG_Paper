@@ -1,63 +1,113 @@
 import torch.nn as nn
 import torch
-# import PyTorch chneural network model 
 
 class cnn_basic(nn.Module):
+    """
+    CNN + FNN model for CSI feature extraction and processing
+    
+    Architecture:
+    - Conv2d layer 1: Extract local CSI features from temporal window
+    - Conv2d layer 2: Fuse channels
+    - Fully connected layers: Map to final 51-dim CSI features
+    
+    Input: (batch, 1, 2, 51) - 2 time steps of 51 CSI subcarriers
+    Output: (batch, 51) - Predicted CSI features
+    """
     def __init__(self):
-        super(cnn_basic,self).__init__()
-        self.conv1 = nn.Sequential(nn.Conv2d(1,4,kernel_size=(2,3),padding=(0,1)),
-                                   nn.LayerNorm([4,1,51]),
-                                   nn.ReLU())
-        #
-        self.conv2 = nn.Sequential(nn.Conv2d(4,1,kernel_size=(1,1)),
-                                   nn.LayerNorm([1,1,51]),
-                                   nn.ReLU())
-        self.fnn = nn.Sequential(nn.Linear(51,32),
-                                 nn.LayerNorm(32),
-                                 nn.ReLU(),
-                                 nn.Linear(32,32),
-                                 nn.LayerNorm(32),
-                                 nn.ReLU(),
-                                 nn.Linear(32,51),
-                                 nn.LayerNorm(51),   
-                                 nn.Sigmoid()) 
-# Define CNN+FNN model for CSI feature extraction and processing
-# ©w∏q CNN+FNN º“´¨°A•Œ©Û CSI ØSºx©‚®˙ªP≥B≤z
+        super(cnn_basic, self).__init__()
+        
+        # First convolutional layer: extract local features
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(1, 4, kernel_size=(2, 3), padding=(0, 1)),
+            nn.LayerNorm([4, 1, 51]),
+            nn.ReLU()
+        )
+        
+        # Second convolutional layer: channel fusion
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(4, 1, kernel_size=(1, 1)),
+            nn.LayerNorm([1, 1, 51]),
+            nn.ReLU()
+        )
+        
+        # Fully connected network: feature mapping
+        self.fnn = nn.Sequential(
+            nn.Linear(51, 32),
+            nn.LayerNorm(32),
+            nn.ReLU(),
+            nn.Linear(32, 32),
+            nn.LayerNorm(32),
+            nn.ReLU(),
+            nn.Linear(32, 51),
+            nn.LayerNorm(51),   
+            nn.Sigmoid()
+        )
 
-    def forward(self,x):
-        out1 = self.conv1(x)
-        out2 = self.conv2(out1)
-        out2 = torch.squeeze(out2)
-        out = self.fnn(out2)
-# Forward pass: 
-# 1. conv1 extracts local CSI features
-# 2. conv2 fuses channels
-# 3. squeeze flattens to vector
-# 4. fnn maps to final 51-dim features
+    def forward(self, x):
+        """
+        Forward pass through the network
+        
+        Args:
+            x: Input tensor of shape (batch, 1, 2, 51)
+        
+        Returns:
+            out: Output tensor of shape (batch, 51)
+        
+        Process:
+        1. conv1: Extract local CSI features
+        2. conv2: Fuse channels
+        3. squeeze: Flatten to vector
+        4. fnn: Map to final 51-dim features
+        """
+        out1 = self.conv1(x)        # (batch, 4, 1, 51)
+        out2 = self.conv2(out1)     # (batch, 1, 1, 51)
+        out2 = torch.squeeze(out2)  # (batch, 51)
+        out = self.fnn(out2)        # (batch, 51)
         return out
 
-if __name__ == "__main__":
-    x = torch.rand(1,2,51)
-    test = cnn_basic()
-    hold = test(x)
-    print(hold.size())
 
-# ≥o¨qµ{¶°ΩX¨O•Dµ{¶°¥˙∏’∞œ (main block)°A
-# •u¶≥∑Ì≥o≠”¿…Æ◊≥Q°u™Ω±µ∞ı¶Ê°vÆ…§~∑|∞ı¶Ê°A§£∑|¶b≥Q import Æ…¶€∞ ∂]°C
-#
-# Step 1. ´ÿ•ﬂ¿Hæ˜øÈ§J∏ÍÆ∆ x = torch.rand(1,1,2,51)
-#   - º“¿¿ CSI ØSºxº∆æ⁄
-#   - tensor ÆÊ¶°¨∞ (batch=1, channel=1, height=2, width=51)
-#   - ≥o≤≈¶X Conv2d ©“ª›™∫øÈ§J∫˚´◊ (N, C, H, W)
-#
-# Step 2. ´ÿ•ﬂº“´¨ test = cnn_basic()
-#   - πÍ®“§∆ßA©w∏q™∫ CNN+FNN º“´¨
-#
-# Step 3. hold = test(x)
-#   - ß‚¿Hæ˜ CSI øÈ§J•·∂iº“´¨
-#   - ≥o∑|¶€∞ ©I•s forward()°A∞ı¶Ê conv1 °˜ conv2 °˜ squeeze °˜ fnn
-#
-# Step 4. print(hold.size())
-#   - ¶L•Xº“´¨≥Ã≤◊øÈ•X™∫ shape
-#   - πw¥¡øÈ•X§j§p¨∞ torch.Size([1, 51])°A•N™Ì 51 ∫˚ØSºx¶V∂q
-#
+if __name__ == "__main__":
+    """
+    Testing the CNN model
+    
+    This main block only runs when this file is executed directly,
+    not when imported as a module.
+    
+    Steps:
+    1. Create random input: x = torch.rand(1, 1, 2, 51)
+       - Simulates CSI feature data
+       - Tensor format: (batch=1, channel=1, height=2, width=51)
+       - Matches Conv2d input requirements (N, C, H, W)
+    
+    2. Initialize model: test = cnn_basic()
+       - Instantiate the defined CNN+FNN model
+    
+    3. Forward pass: hold = test(x)
+       - Feed random CSI input into model
+       - Automatically calls forward(), executing conv1 -> conv2 -> squeeze -> fnn
+    
+    4. Print output shape: print(hold.size())
+       - Display final output shape
+       - Expected output size: torch.Size([1, 51]), representing 51-dim feature vector
+    """
+    
+    # Create test input with correct dimensions
+    x = torch.rand(1, 1, 2, 51)  # (batch, channel, height, width)
+    
+    # Initialize model
+    test = cnn_basic()
+    test.eval()  # Set to evaluation mode
+    
+    # Forward pass
+    with torch.no_grad():
+        hold = test(x)
+    
+    # Display results
+    print("="*50)
+    print("CNN Model Test")
+    print("="*50)
+    print(f"Input shape:  {x.shape}")
+    print(f"Output shape: {hold.shape}")
+    print(f"Expected:     torch.Size([1, 51])")
+    print(f"Match: {'‚úÖ' if hold.shape == torch.Size([1, 51]) else '‚ùå'}")
+    print("="*50
