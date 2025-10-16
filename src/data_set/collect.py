@@ -9,7 +9,7 @@ import serial
 #==============Config==========================================
 PORTS     = ['/dev/ttyUSB0', '/dev/ttyUSB1']   # Two ESP32 devices
 BAUDRATE  = 115200                             # Serial baud rate
-DATA_PATH = "~/PLKG_Project/data/collect"      # Folder for saving files
+DATA_PATH = "/home/owen/PLKG_Project/data/collect"   # Folder for saving files
 DEFAULT   = "csi_data"                         # File prefix
 FILETYPE  = ".csv"                             # File extension
 #==============================================================
