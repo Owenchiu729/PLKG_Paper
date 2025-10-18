@@ -1,189 +1,181 @@
 import numpy as np
-import torch
+import torch 
 from torch.utils.data import Dataset
+import pandas as pd
+
+# ==============================================================================
+#  STEP 1: DATA LOADING AND FEATURE ENGINEERING FUNCTION
+# ==============================================================================
+
+def load_and_process_csi_data(file_path_0, file_path_1):
+    """
+    Loads and processes CSI data using numerically stable and memory-efficient methods.
+    """
+    def _parse_and_extract_features(file_path):
+        """Helper function to parse a single CSV and extract features."""
+        df = pd.read_csv(file_path)
+        df.dropna(subset=['payload'], inplace=True)
+        df = df[df['payload'].str.startswith('serial_num:')]
+        
+        processed_data = []
+        for payload_str in df['payload']:
+            try:
+                clean_str = payload_str.replace('serial_num:,', '', 1).strip(',"')
+                if not clean_str: continue
+                
+                parts = clean_str.split(',')
+                numeric_values = [int(p) for p in parts]
+                
+                # Using index 3 for RSSI as previously determined
+                rssi = numeric_values[3] 
+                csi_raw = np.array(numeric_values[9:])
+
+                if len(csi_raw) % 2 != 0:
+                    csi_raw = csi_raw[:-1]
+                
+                csi_pairs = csi_raw.reshape(-1, 2)
+                real_part = csi_pairs[:, 0]
+                imag_part = csi_pairs[:, 1]
+                
+                # --- Advanced Feature Calculation ---
+                # 1. Magnitude (numerically stable)
+                real_f = real_part.astype(np.float32, copy=False)
+                imag_f = imag_part.astype(np.float32, copy=False)
+                magnitude = np.hypot(real_f, imag_f)
+
+                # 2. Phase + CPO removal
+                phase = np.unwrap(np.arctan2(imag_f, real_f))
+                phase -= phase.mean(dtype=np.float64)
+                
+                final_features = np.concatenate(([rssi], magnitude, phase))
+                processed_data.append(final_features)
+
+            except (ValueError, IndexError):
+                continue
+        
+        return np.array(processed_data, dtype=np.float32)
+
+    # --- Main processing flow ---
+    print("Processing data for device 0...")
+    data_0 = _parse_and_extract_features(file_path_0)
+    print(f"  - Found {len(data_0)} samples with {data_0.shape[1]} features.")
+    
+    print("Processing data for device 1...")
+    data_1 = _parse_and_extract_features(file_path_1)
+    print(f"  - Found {len(data_1)} samples with {data_1.shape[1]} features.")
+
+    min_len = min(len(data_0), len(data_1))
+    data_0 = data_0[:min_len]
+    data_1 = data_1[:min_len]
+    print(f"Aligned sample length to: {min_len}")
+
+    min_features = min(data_0.shape[1], data_1.shape[1])
+    data_0 = data_0[:, :min_features]
+    data_1 = data_1[:, :min_features]
+    print(f"Aligned feature count to: {min_features}")
+    
+    # --- Advanced Z-Score Normalization (Memory Efficient) ---
+    EPS = 1e-6
+    # Number of subcarriers (M) for mag/pha features
+    M = (data_0.shape[1] - 1) // 2 
+
+    # Extract segments for in-place modification
+    mag0 = data_0[:, 1:1+M];  pha0 = data_0[:, 1+M:1+2*M]
+    mag1 = data_1[:, 1:1+M];  pha1 = data_1[:, 1+M:1+2*M]
+
+    # Calculate statistics for Magnitude
+    n_mag = mag0.size + mag1.size
+    sum_mag  = mag0.sum(dtype=np.float64) + mag1.sum(dtype=np.float64)
+    sum2_mag = (mag0**2).sum(dtype=np.float64) + (mag1**2).sum(dtype=np.float64)
+    mu_mag = sum_mag / n_mag
+    sigma_mag = np.sqrt(max(sum2_mag / n_mag - mu_mag**2, 0.0))
+
+    # Calculate statistics for Phase
+    n_pha = pha0.size + pha1.size
+    sum_pha  = pha0.sum(dtype=np.float64) + pha1.sum(dtype=np.float64)
+    sum2_pha = (pha0**2).sum(dtype=np.float64) + (pha1**2).sum(dtype=np.float64)
+    mu_pha = sum_pha / n_pha
+    sigma_pha = np.sqrt(max(sum2_pha / n_pha - mu_pha**2, 0.0))
+    
+    print(f"Calculated Mag stats: mu={mu_mag:.4f}, sigma={sigma_mag:.4f}")
+    print(f"Calculated Pha stats: mu={mu_pha:.4f}, sigma={sigma_pha:.4f}")
+
+    # Apply normalization in-place
+    np.subtract(mag0, mu_mag, out=mag0);  np.divide(mag0, sigma_mag + EPS, out=mag0)
+    np.subtract(mag1, mu_mag, out=mag1);  np.divide(mag1, sigma_mag + EPS, out=mag1)
+    np.subtract(pha0, mu_pha, out=pha0);  np.divide(pha0, sigma_pha + EPS, out=pha0)
+    np.subtract(pha1, mu_pha, out=pha1);  np.divide(pha1, sigma_pha + EPS, out=pha1)
+
+    stacked_data = np.stack([data_0, data_1], axis=0)
+    
+    return stacked_data
+
+# ==============================================================================
+#  STEP 2: PYTORCH DATASET CLASSES
+# ==============================================================================
 
 class base_Dataset(Dataset):
-    """Base Dataset class - Single ESP32 device"""
-    def __init__(self, data: np.array):
-        # data shape: (samples, features) - [RSSI, CSI_1, ..., CSI_51]
-        self.rssi = torch.from_numpy(data[:, 0]).float()
-        self.csi = torch.from_numpy(data[:, 1:52]).float()
-    
-    def __getitem__(self, index):
-        # Return CSI and RSSI (or other labels)
-        return self.csi[index], self.rssi[index]
-    
+    """Base class to handle the stacked (2, N, M) data structure."""
+    def __init__(self, stacked_data: np.array):
+        self.data_device_0 = torch.from_numpy(stacked_data[0, :, 1:]).float()
+        self.labels_device_1 = torch.from_numpy(stacked_data[1, :, 1:]).float()
+        self.rssi_device_0 = torch.from_numpy(stacked_data[0, :, 0]).float()
+        self.rssi_device_1 = torch.from_numpy(stacked_data[1, :, 0]).float()
+        self.length = stacked_data.shape[1]
+
     def __len__(self):
-        return len(self.csi)
+        return self.length
 
-
-# Pure CSI - Basic CSI dataset
-class csi_dataset(Dataset):
-    def __init__(self, data: np.array):
-        """
-        data shape: (samples, 52) - [RSSI, CSI_1...CSI_51]
-        For basic CSI feature learning
-        """
-        self.csi_data = torch.from_numpy(data[:, 1:52]).float()
-        self.labels = torch.from_numpy(data[:, 0]).float()  # RSSI as label
-    
+class PairedCsiDataset(base_Dataset):
+    """Returns one timestamp from each device."""
+    def __init__(self, stacked_data: np.array):
+        super().__init__(stacked_data)
+        
     def __getitem__(self, index):
-        return self.csi_data[index], self.labels[index]
-    
-    def __len__(self):
-        return len(self.csi_data)
+        return self.data_device_0[index], self.labels_device_1[index]
 
-
-# CSI CNN approach - Using temporal window
-class csi_cnn_dataset(Dataset):
-    def __init__(self, data: np.array, window_size=2):
-        """
-        data shape: (samples, 52)
-        Use sliding window to capture temporal correlation
-        window_size: temporal window size
-        """
-        self.csi_data = torch.from_numpy(data[:, 1:52]).float()
-        self.labels = torch.from_numpy(data[:, 0]).float()
+class CsiCnnDataset(base_Dataset):
+    """Uses a sliding window to create samples for CNNs."""
+    def __init__(self, stacked_data: np.array, window_size=5):
+        super().__init__(stacked_data)
         self.window_size = window_size
-    
+        self.length = super().__len__() - self.window_size + 1
+
     def __getitem__(self, index):
-        # Take window_size consecutive samples as input
-        # shape: (1, window_size, 51) -> convert to (1, 1, window_size, 51)
-        data = self.csi_data[index:index+self.window_size]  # (window_size, 51)
-        data = data.unsqueeze(0).unsqueeze(0)  # (1, 1, window_size, 51)
-        label = self.labels[index+self.window_size-1]  # Label of the last time step
-        return data.squeeze(0), label  # Return (1, window_size, 51) for batch processing
+        data_window = self.data_device_0[index : index + self.window_size]
+        label = self.labels_device_1[index + self.window_size - 1]
+        return data_window.unsqueeze(0), label
     
     def __len__(self):
-        return len(self.csi_data) - self.window_size + 1
+        return self.length
 
-
-# CSI CNN with LSTM - Time series with all features
-class csi_cnn_lstm_dataset(Dataset):
-    def __init__(self, data: np.array, window_size=2):
-        """
-        data shape: (samples, 52) - includes RSSI + CSI
-        For LSTM time series prediction
-        """
-        self.all_data = torch.from_numpy(data).float()  # Include all features
-        self.labels = torch.from_numpy(data[:, 0]).float()  # RSSI as label
-        self.window_size = window_size
-    
-    def __getitem__(self, index):
-        # shape: (1, window_size, 52) - includes all features
-        data = self.all_data[index:index+self.window_size]  # (window_size, 52)
-        data = data.unsqueeze(0).unsqueeze(0)  # (1, 1, window_size, 52)
-        label = self.labels[index+self.window_size-1]
-        return data.squeeze(0), label  # Return (1, window_size, 52)
-    
-    def __len__(self):
-        return len(self.all_data) - self.window_size + 1
-
-
-# Quantized CSI dataset - Quantized CSI (real + imaginary parts)
-class csi_quan_dataset(Dataset):
-    def __init__(self, data: np.array):
-        """
-        data shape: (samples, 103) - [RSSI, CSI_real_1...CSI_real_51, CSI_imag_1...CSI_imag_51]
-        Quantized CSI contains real and imaginary parts (51*2=102)
-        """
-        self.csi_data = torch.from_numpy(data[:, 1:103]).float()  # 102-dim quantized CSI
-        self.labels = torch.from_numpy(data[:, 0]).float()
-    
-    def __getitem__(self, index):
-        return self.csi_data[index], self.labels[index]
-    
-    def __len__(self):
-        return len(self.csi_data)
-
-
-# CSI CNN quantization approach - Temporal window with quantized CSI
-class csi_cnn_quan_dataset(Dataset):
-    def __init__(self, data: np.array, window_size=2):
-        """
-        Quantized CSI + CNN temporal window
-        """
-        self.csi_data = torch.from_numpy(data[:, 1:103]).float()
-        self.labels = torch.from_numpy(data[:, 0]).float()
-        self.window_size = window_size
-    
-    def __getitem__(self, index):
-        data = self.csi_data[index:index+self.window_size]  # (window_size, 102)
-        data = data.unsqueeze(0).unsqueeze(0)  # (1, 1, window_size, 102)
-        label = self.labels[index+self.window_size-1]
-        return data.squeeze(0), label  # Return (1, window_size, 102)
-    
-    def __len__(self):
-        return len(self.csi_data) - self.window_size + 1
-
-
-# CSI CNN speed quantization - Quantized CSI + speed feature
-class csi_cnn_speed_quan_dataset(Dataset):
-    def __init__(self, data: np.array, window_size=2):
-        """
-        data shape: (samples, 104) - [RSSI, CSI_quan_102, speed]
-        Includes quantized CSI and speed information
-        """
-        self.csi_data = torch.from_numpy(data[:, 1:104]).float()  # CSI + speed
-        self.labels = torch.from_numpy(data[:, 1:103]).float()  # Only CSI as label
-        self.window_size = window_size
-    
-    def __getitem__(self, index):
-        data = self.csi_data[index:index+self.window_size]  # (window_size, 103)
-        data = data.unsqueeze(0).unsqueeze(0)  # (1, 1, window_size, 103)
-        label = self.labels[index+self.window_size-1]
-        return data.squeeze(0), label  # Return (1, window_size, 103)
-    
-    def __len__(self):
-        return len(self.csi_data) - self.window_size + 1
-
-
-# Quantized CSI with LSTM - LSTM version with quantized CSI
-class csi_cnn_quan_lstm_dataset(Dataset):
-    def __init__(self, data: np.array, window_size=3):
-        """
-        Quantized CSI + LSTM (longer temporal window)
-        """
-        self.all_data = torch.from_numpy(data).float()
-        self.labels = torch.from_numpy(data[:, 1:103]).float()  # Quantized CSI as label
-        self.window_size = window_size
-    
-    def __getitem__(self, index):
-        data = self.all_data[index:index+self.window_size]  # (window_size, 104 or all)
-        data = data.unsqueeze(0).unsqueeze(0)  # (1, 1, window_size, features)
-        label = self.labels[index+self.window_size-1]
-        return data.squeeze(0), label  # Return (1, window_size, features)
-    
-    def __len__(self):
-        return len(self.all_data) - self.window_size + 1
-
+# ==============================================================================
+#  STEP 3: EXAMPLE USAGE
+# ==============================================================================
 
 if __name__ == "__main__":
-    # Testing: assume data format is (samples, 52)
-    # Simulate ESP32 collected data
-    dummy_data = np.random.randn(1000, 52)  # 1000 samples
-    
-    # Test basic CSI dataset
-    test1 = csi_dataset(dummy_data)
-    print("csi_dataset:")
-    print("  Input shape:", test1[0][0].shape)   # (51,)
-    print("  Label shape:", test1[0][1].shape)   # ()
-    print("  Dataset length:", len(test1))
-    
-    # Test CNN dataset (temporal window)
-    test2 = csi_cnn_dataset(dummy_data)
-    print("\ncsi_cnn_dataset:")
-    print("  Input shape:", test2[0][0].shape)   # (1, 2, 51)
-    print("  Label shape:", test2[0][1].shape)   # ()
-    print("  Dataset length:", len(test2))
-    
-    # Test quantized CSI dataset
-    dummy_quan_data = np.random.randn(1000, 103)  # Quantized data
-    test3 = csi_quan_dataset(dummy_quan_data)
-    print("\ncsi_quan_dataset:")
-    print("  Input shape:", test3[0][0].shape)   # (102,)
-    print("  Label shape:", test3[0][1].shape)   # ()
-    print("  Dataset length:", len(test3))
+    file_usb0 = 'csi_data_usb0_001.csv'
+    file_usb1 = 'csi_data_usb1_001.csv'
 
+    try:
+        print("--- Starting Data Loading and Processing ---")
+        processed_csi_data = load_and_process_csi_data(file_usb0, file_usb1)
+        print("--- Data Processing Complete! ---")
+        print(f"\nFinal stacked data shape: {processed_csi_data.shape}")
+        
+        print("\n--- Testing PairedCsiDataset ---")
+        dataset = PairedCsiDataset(processed_csi_data)
+        
+        if len(dataset) > 0:
+            print(f"Dataset length: {len(dataset)}")
+            sample_data, sample_label = dataset[0]
+            print(f"Sample data shape (Device 0 features): {sample_data.shape}")
+            print(f"Sample label shape (Device 1 features): {sample_label.shape}")
+        else:
+            print("Dataset is empty. Check your CSV files.")
 
-    #test edit
+    except FileNotFoundError:
+        print(f"\nERROR: Could not find '{file_usb0}' or '{file_usb1}'.")
+        print("Please make sure the CSV files are in the same directory as the script.")
+    except Exception as e:
+        print(f"\nAn unexpected error occurred: {e}")
