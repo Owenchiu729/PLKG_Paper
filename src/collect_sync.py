@@ -54,7 +54,8 @@ def next_filename_for(port: str, out_path: str) -> str:
     else:
         tag = port.lower()
     
-    pattern = os.path.join(out_path, f"{DEFAULT}_{tag}_*{FILETYPE}")
+    # 這裡的 out_path 都是小寫
+    pattern = os.path.join(out_path, f"{DEFAULT}_{tag}_*{FILETYPE}") 
     existed = sorted(glob.glob(pattern))
     index = 1
     if existed:
@@ -64,19 +65,22 @@ def next_filename_for(port: str, out_path: str) -> str:
             index = last_index + 1
         except (ValueError, IndexError):
             index = 1
+            
     return os.path.join(out_path, f"{DEFAULT}_{tag}_{index:03d}{FILETYPE}")
 
 # Thread function for reading data from one port
 def reader_thread(port: str, baudrate: int, out_path: str, max_records: int, filter_key: str):
 #執行緒函式，用於從單一序列埠讀取資料並寫入檔案。
+    
     out_file = next_filename_for(port, out_path)
     print(f"[{port}] Writing to -> {out_file}")
     
     record_count = 0
     ser = None
     try:
-        # 'with' 會管理檔案開關，確保在執行緒結束時檔案被正確關閉
-        with open(out_file, "w", newline="") as f: # 使用 'w' 確保是新檔案
+        # vvvv 【錯誤修正】 vvvv
+        # 這裡的 f 後面必須有冒號 ':'
+        with open(out_file, "w", newline="") as f:
             writer = csv.writer(f)
             # 使用 'ts_ns' (nanoseconds) 作為表頭
             writer.writerow(["ts_ns", "port", "payload"])
@@ -142,11 +146,13 @@ def main():
                         action="append", 
                         help="指定要監聽的 Serial Port (可多次使用, e.g., --port /dev/ttyUSB0 --port /dev/ttyUSB1)")
     parser.add_argument("--baud", type=int, default=115200, help="Baudrate (預設: 115200)")
+    
+    # 這裡的 --path 都是小寫
     parser.add_argument("--path", default=DATA_PATH, help=f"輸出資料夾 (預設: {DATA_PATH})")
     parser.add_argument("--max", 
                         type=int, 
-                        default=100000,  # <--- 已修改預設值為 10 萬
-                        help="每個 Port 收集的筆數上限 (預設: 100000)")
+                        default=50000,
+                        help="每個 Port 收集的筆數上限 (預設: 50000)")
     parser.add_argument("--filter", default="serial_num:", help="要儲存的資料行必須包含的關鍵字 (預設: 'serial_num:')")
     
     args = parser.parse_args()
@@ -157,11 +163,11 @@ def main():
         print("No --port specified, auto-detecting...")
         ports_to_use = auto_detect_ports()
         if not ports_to_use:
-            print(" 找不到任何 Serial Port，請接上 ESP32 或用 --port 指定")
+            print("❌ 找不到任何 Serial Port，請接上 ESP32 或用 --port 指定")
             return
-        print(f" Auto-detected ports: {ports_to_use}")
+        print(f"✅ Auto-detected ports: {ports_to_use}")
     else:
-        print(f" Using specified ports: {ports_to_use}")
+        print(f"✅ Using specified ports: {ports_to_use}")
 
     print("\n--- CSI Collector ---")
     print(f"Baud: {args.baud} | Max Records: {args.max} | Filter: '{args.filter}'")
@@ -181,6 +187,8 @@ def main():
                     if threads[p] is None or not threads[p].is_alive():
                         print(f"Starting thread for {p}...")
                         # 移除 daemon=True，確保安全關閉
+                        
+                        # 這裡的 args.path 都是小寫
                         t = threading.Thread(target=reader_thread, 
                                              args=(p, args.baud, args.path, args.max, args.filter))
                         t.start()

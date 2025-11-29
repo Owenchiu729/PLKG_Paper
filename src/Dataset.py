@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import numpy as np
 import torch 
 from torch.utils.data import Dataset
@@ -12,93 +11,58 @@ def load_and_process_csi_data(file_path_0, file_path_1):
     """
     Loads and processes CSI data using numerically stable and memory-efficient methods.
     """
-    
     def _parse_and_extract_features(file_path):
-        """
-        Helper function to parse a single CSV, extract features,
-        and ensure all rows have consistent length.
-        """
+        """Helper function to parse a single CSV and extract features."""
         df = pd.read_csv(file_path)
         df.dropna(subset=['payload'], inplace=True)
         df = df[df['payload'].str.startswith('serial_num:')]
-        # --- 這整段邏輯現在被正確地縮排在函式內部 ---
+        
         processed_data = []
-        target_len = None  # 第一筆樣本長度（用來保持一致）
-        drop_cnt = 0
-
         for payload_str in df['payload']:
             try:
-                # 移除標頭與多餘符號
                 clean_str = payload_str.replace('serial_num:,', '', 1).strip(',"')
-                if not clean_str:
-                    continue
-
-                # 分割字串為整數
+                if not clean_str: continue
+                
                 parts = clean_str.split(',')
                 numeric_values = [int(p) for p in parts]
+                
+                # Using index 3 for RSSI as previously determined
+                rssi = numeric_values[3] 
+                csi_raw = np.array(numeric_values[9:])
 
-                # RSSI 正確索引是 [1]
-                rssi = numeric_values[1]
-
-                # 取 CSI 原始資料（略過 serial_num, RSSI, noise 等前幾欄）
-                csi_raw = np.array(numeric_values[9:], dtype=np.int32)
-                if csi_raw.size < 4:
-                    drop_cnt += 1
-                    continue
-
-                # 確保實虛成對（偶數個）
-                if csi_raw.size % 2 != 0:
+                if len(csi_raw) % 2 != 0:
                     csi_raw = csi_raw[:-1]
-
+                
                 csi_pairs = csi_raw.reshape(-1, 2)
-                real_f = csi_pairs[:, 0].astype(np.float32, copy=False)
-                imag_f = csi_pairs[:, 1].astype(np.float32, copy=False)
-
-                # 1) Magnitude（數值穩定）
+                real_part = csi_pairs[:, 0]
+                imag_part = csi_pairs[:, 1]
+                
+                # --- Advanced Feature Calculation ---
+                # 1. Magnitude (numerically stable)
+                real_f = real_part.astype(np.float32, copy=False)
+                imag_f = imag_part.astype(np.float32, copy=False)
                 magnitude = np.hypot(real_f, imag_f)
 
-                # 2) Phase（相位展開 + 去平均 / 去共同相位偏移）
+                # 2. Phase + CPO removal
                 phase = np.unwrap(np.arctan2(imag_f, real_f))
                 phase -= phase.mean(dtype=np.float64)
-
-                # 合併 RSSI + CSI 特徵
+                
                 final_features = np.concatenate(([rssi], magnitude, phase))
-
-                # --- 確保所有樣本同長度 ---
-                if target_len is None:
-                    target_len = final_features.size
-                elif final_features.size != target_len:
-                    # 長度不一致 → 截斷或跳過
-                    if final_features.size > target_len:
-                        final_features = final_features[:target_len]
-                    else:
-                        drop_cnt += 1
-                        continue
-
                 processed_data.append(final_features)
 
             except (ValueError, IndexError):
-                drop_cnt += 1
                 continue
-
-        if drop_cnt:
-            print(f"  [WARN] In {file_path}, dropped {drop_cnt} rows due to parsing errors or length mismatch.")
-            
+        
         return np.array(processed_data, dtype=np.float32)
-        # --- 縮排修正結束 ---
 
     # --- Main processing flow ---
-    # (這一段現在可以正確地呼叫上面定義好的 _parse_and_extract_features)
     print("Processing data for device 0...")
     data_0 = _parse_and_extract_features(file_path_0)
-    print(f"  - Found {len(data_0)} samples with {data_0.shape[1] if len(data_0) > 0 else 0} features.")
+    print(f"  - Found {len(data_0)} samples with {data_0.shape[1]} features.")
     
     print("Processing data for device 1...")
     data_1 = _parse_and_extract_features(file_path_1)
-    print(f"  - Found {len(data_1)} samples with {data_1.shape[1] if len(data_1) > 0 else 0} features.")
-
-    if len(data_0) == 0 or len(data_1) == 0:
-        raise ValueError("One or both data files resulted in zero valid samples. Check CSV content or parsing logic.")
+    print(f"  - Found {len(data_1)} samples with {data_1.shape[1]} features.")
 
     min_len = min(len(data_0), len(data_1))
     data_0 = data_0[:min_len]
@@ -112,17 +76,21 @@ def load_and_process_csi_data(file_path_0, file_path_1):
     
     # --- Advanced Z-Score Normalization (Memory Efficient) ---
     EPS = 1e-6
+    # Number of subcarriers (M) for mag/pha features
     M = (data_0.shape[1] - 1) // 2 
 
+    # Extract segments for in-place modification
     mag0 = data_0[:, 1:1+M];  pha0 = data_0[:, 1+M:1+2*M]
     mag1 = data_1[:, 1:1+M];  pha1 = data_1[:, 1+M:1+2*M]
 
+    # Calculate statistics for Magnitude
     n_mag = mag0.size + mag1.size
     sum_mag  = mag0.sum(dtype=np.float64) + mag1.sum(dtype=np.float64)
     sum2_mag = (mag0**2).sum(dtype=np.float64) + (mag1**2).sum(dtype=np.float64)
     mu_mag = sum_mag / n_mag
     sigma_mag = np.sqrt(max(sum2_mag / n_mag - mu_mag**2, 0.0))
 
+    # Calculate statistics for Phase
     n_pha = pha0.size + pha1.size
     sum_pha  = pha0.sum(dtype=np.float64) + pha1.sum(dtype=np.float64)
     sum2_pha = (pha0**2).sum(dtype=np.float64) + (pha1**2).sum(dtype=np.float64)
@@ -132,6 +100,7 @@ def load_and_process_csi_data(file_path_0, file_path_1):
     print(f"Calculated Mag stats: mu={mu_mag:.4f}, sigma={sigma_mag:.4f}")
     print(f"Calculated Pha stats: mu={mu_pha:.4f}, sigma={sigma_pha:.4f}")
 
+    # Apply normalization in-place
     np.subtract(mag0, mu_mag, out=mag0);  np.divide(mag0, sigma_mag + EPS, out=mag0)
     np.subtract(mag1, mu_mag, out=mag1);  np.divide(mag1, sigma_mag + EPS, out=mag1)
     np.subtract(pha0, mu_pha, out=pha0);  np.divide(pha0, sigma_pha + EPS, out=pha0)
@@ -204,16 +173,6 @@ if __name__ == "__main__":
             print(f"Sample label shape (Device 1 features): {sample_label.shape}")
         else:
             print("Dataset is empty. Check your CSV files.")
-
-        # ==========================================================
-        # Optional: Save processed numpy arrays
-        # ==========================================================
-        np.save("stacked_data.npy", processed_csi_data)
-        print(" Saved processed data to 'stacked_data.npy' successfully.")
-        
-        np.save("usb0_processed.npy", processed_csi_data[0])
-        np.save("usb1_processed.npy", processed_csi_data[1])
-        print(" Saved usb0/usb1 processed data as separate .npy files.")
 
     except FileNotFoundError:
         print(f"\nERROR: Could not find '{file_usb0}' or '{file_usb1}'.")
